@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>VisionSketch AI</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        :root { --primary: #4285f4; --bg: #ffc800; --dark: #202124; --white: #ffffff; }
+        
+        body { 
+            background-color: var(--bg); 
+            font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
+            margin: 0; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            height: 100vh;
+            overflow: hidden;
+            color: var(--dark); 
+        }
+        
+        .main-title { font-size: 3rem; font-weight: 900; margin: 15px 0 5px 0; letter-spacing: -1px; }
+        .sub-title {font-size: 1.3rem;color: blue;font-weight: bold;margin: 5px 0 15px 0;display: flex;align-items: center;gap: 5px;}
+
+        .stats-bar { width: 800px; display: flex; justify-content: space-between; font-size: 1.5rem; font-weight: bold; padding: 5px 0; }
+        .target-word { font-size: 1.8rem; font-weight: 700; text-transform: uppercase; margin: 5px 0 10px 0; color: var(--dark); }
+
+        .canvas-wrapper { 
+            position: relative; 
+            background: white; 
+            border-radius: 15px; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15); 
+            border: 5px solid var(--dark); 
+            width: 800px; 
+            height: 450px;
+        }
+        canvas { border-radius: 10px; cursor: crosshair; touch-action: none; }
+
+        .overlay { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            background: white; display: flex; flex-direction: column; 
+            justify-content: center; align-items: center; border-radius: 10px; z-index: 100; 
+        }
+
+        button { 
+            padding: 12px 30px; 
+            font-size: 1rem; 
+            font-weight: bold; 
+            border: none; 
+            border-radius: 50px; 
+            cursor: pointer; 
+            transition: all 0.1s; 
+            box-shadow: 0 4px 0px rgba(0,0,0,0.2);
+            text-transform: uppercase;
+        }
+        button:active { transform: translateY(3px); box-shadow: none; }
+
+        .btn-start { background: var(--primary); color: white; font-size: 1.5rem; padding: 15px 45px; box-shadow: 0 5px 0px #2a569d; }
+        .btn-clear { background: #eee; color: #333; box-shadow: 0 4px 0px #bbb; }
+        .btn-submit { background: green; color: white; box-shadow: 0 4px 0px #000; }
+        
+        .controls { margin-top: 15px; display: flex; gap: 12px; }
+        
+        .feedback { margin-top: 12px; font-size: 1.1rem; font-weight: bold; height: 25px; }
+        .timer-warn { color: #d93025; animation: blink 0.8s infinite; }
+    </style>
+</head>
+<body>
+
+    <h1 class="main-title">VisionSketch AI !</h1>
+    <p class="sub-title">
+        A doodling ✍🏻 and guessing 🧠 game inspired by <i>`QuickDraw by Google.`</i>
+    </p>
+
+    <div id="app">
+        <div v-if="gameActive" class="stats-bar">
+            <span>Round {{ currentRound }} / 5</span>
+            <span :class="{'timer-warn': timeLeft <= 5}">⏰ {{ timeLeft }}s</span>
+            <span>Score: {{ score }}</span>
+        </div>
+
+        <div v-if="gameActive && !showResult">
+            <div class="target-word">Draw: {{ targetWord.replace(/_/g, ' ') }}</div>
+        </div>
+
+        <div class="canvas-wrapper">
+            <div class="overlay" v-if="!gameActive">
+                <div v-if="currentRound !== 0" style="font-size: 5rem; margin-bottom: 10px;">🏆</div>
+                <h2 v-if="currentRound === 0" style="margin-bottom: 20px;">5 ROUNDS CHALLENGE</h2>
+                <h2 v-else style="margin-bottom: 20px;">Final Score: {{ score }} / 5</h2>
+                <button class="btn-start" @click="startNewGame">Start playing</button>
+            </div>
+
+            <canvas id="canvas" width="800" height="450" 
+                @mousedown="start" @mousemove="draw" @mouseup="stop" 
+                @touchstart="start" @touchmove="draw" @touchend="stop">
+            </canvas>
+        </div>
+
+        <div class="controls" v-if="gameActive">
+            <button class="btn-clear" @click="clearCanvas">Clear</button>
+            <button class="btn-submit" @click="autoSubmit" :disabled="loading">
+                {{ loading ? 'Analyzing...' : 'Submit' }}
+            </button>
+        </div>
+
+        <div class="feedback" v-if="gameActive">
+            <span v-if="loading" style="color: var(--primary);">AI is guessing...</span>
+            <div v-if="showResult">
+                <span v-if="lastResultCorrect" style="color: #1e8e3e;">🌟 AMAZING! CORRECT! AI says: {{ lastGuess.toUpperCase() }} ({{ lastConfidence }}%).</span>
+                <span v-else style="color: #d93025;">❌ NOPE! AI says: {{ lastGuess.toUpperCase() }}.</span>
+            </div>
+        </div>
+    </div>
+
+<script>
+    const { createApp } = Vue;
+    const API_BASE_URL = 'https://jnh6deefzf.execute-api.us-east-1.amazonaws.com';
+
+    createApp({
+        data() {
+            return {
+                gameActive: false, currentRound: 0, score: 0, timeLeft: 35, timer: null,
+                targetWord: '', drawing: false, ctx: null, loading: false,
+                showResult: false, lastResultCorrect: false, lastGuess: '', lastConfidence: 0,
+                allCategories: []
+            }
+        },
+        async mounted() {
+            const canvas = document.getElementById('canvas');
+            this.ctx = canvas.getContext('2d');
+            this.ctx.lineWidth = 14; this.ctx.lineCap = 'round';
+            this.clearCanvas();
+            
+            // Fetch categories via the API Gateway Proxy
+            try {
+                const res = await axios.get(`${API_BASE_URL}/categories`);
+                this.allCategories = res.data.categories;
+            } catch(e) { 
+                console.error("Categories fetch failed:", e);
+                this.allCategories = ['apple', 'banana', 'car', 'tree', 'cat']; 
+            }
+        },
+        methods: {
+            startNewGame() { this.score = 0; this.currentRound = 0; this.nextRound(); },
+            nextRound() {
+                if (this.currentRound >= 5) { this.gameActive = false; return; }
+                this.currentRound++; this.showResult = false; this.gameActive = true; this.timeLeft = 35;
+                this.targetWord = this.allCategories[Math.floor(Math.random() * this.allCategories.length)];
+                this.clearCanvas(); this.startTimer();
+            },
+            startTimer() {
+                clearInterval(this.timer);
+                this.timer = setInterval(() => { this.timeLeft--; if (this.timeLeft <= 0) this.autoSubmit(); }, 1000);
+            },
+            autoSubmit() { clearInterval(this.timer); this.submitToAI(); },
+            clearCanvas() { 
+                this.ctx.fillStyle = "white"; 
+                this.ctx.fillRect(0, 0, 800, 450); 
+                this.ctx.strokeStyle = "black"; // Reset stroke color
+            },
+            start(e) { if(!this.gameActive || this.showResult) return; this.drawing = true; this.draw(e); },
+            stop() { this.drawing = false; this.ctx.beginPath(); },
+            draw(e) {
+                if (!this.drawing) return; e.preventDefault();
+                const rect = e.target.getBoundingClientRect();
+                const x = (e.clientX || (e.touches && e.touches[0].clientX)) - rect.left;
+                const y = (e.clientY || (e.touches && e.touches[0].clientY)) - rect.top;
+                this.ctx.lineTo(x, y); this.ctx.stroke();
+            },
+            async submitToAI() {
+                this.loading = true;
+                const canvas = document.getElementById('canvas');
+                
+                canvas.toBlob(async (blob) => {
+                    const fd = new FormData();
+                    fd.append('file', blob, 'drawing.png');
+                    
+                    try {
+                        // POST to the API Gateway Proxy
+                        const res = await axios.post(`${API_BASE_URL}/predict`, fd, {
+                            headers: { 'Content-Type': 'application/octet-stream' } 
+                        });
+                        
+                        this.lastGuess = res.data.prediction;
+                        this.lastConfidence = res.data.confidence ? res.data.confidence.toFixed(1) : 0;
+                        this.lastResultCorrect = this.lastGuess.toLowerCase().includes(this.targetWord.toLowerCase());
+                        
+                        if (this.lastResultCorrect) this.score++;
+                        this.showResult = true; 
+                        this.loading = false;
+                        setTimeout(() => this.nextRound(), 3000);
+                        
+                    } catch (e) { 
+                        console.error("Prediction failed:", e);
+                        alert("Backend Connection Lost! Please ensure EC2 main.py is running."); 
+                        this.loading = false; 
+                    }
+                }, 'image/png');
+            }
+        }
+    }).mount('#app')
+</script>
+</body>
+</html>
